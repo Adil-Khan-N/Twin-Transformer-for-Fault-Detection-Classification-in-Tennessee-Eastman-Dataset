@@ -13,7 +13,7 @@ source venv/bin/activate   # Linux/Mac
 venv\Scripts\activate      # Windows
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
 
 #### **Running the Experiment**
 ```bash
