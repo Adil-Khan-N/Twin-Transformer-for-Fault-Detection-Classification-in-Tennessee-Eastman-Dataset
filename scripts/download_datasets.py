@@ -1,58 +1,89 @@
-# scripts/download_dataset.py
 import os
-import kagglehub
 import shutil
-import pyreadr  # to read RData files
+import subprocess
+import zipfile
 import pandas as pd
 
 def download_and_prepare_dataset():
-    # Define target folder in repo
-    target_dir = os.path.join(os.path.dirname(__file__), "..", "datasets")
+    target_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datasets"))
     os.makedirs(target_dir, exist_ok=True)
 
-    # Mapping of RData → CSV filenames
     mapping = {
         "TEP_FaultFree_Training.RData": "fault_free_training.csv",
         "TEP_FaultFree_Testing.RData": "fault_free_testing.csv",
         "TEP_Faulty_Training.RData": "faulty_training.csv",
-        "TEP_Faulty_Testing.RData": "faulty_testing.csv"
+        "TEP_Faulty_Testing.RData": "faulty_testing.csv",
     }
 
-    # Check if all CSVs exist
     all_csv_exist = all(os.path.exists(os.path.join(target_dir, csv_name)) for csv_name in mapping.values())
     if all_csv_exist:
         print("⚡ All CSV files already exist in datasets/. Skipping download and conversion.")
         return
 
-    # Download dataset from Kaggle
     print("📥 Downloading dataset from Kaggle...")
-    path = kagglehub.dataset_download("averkij/tennessee-eastman-process-simulation-dataset")
-    print("✅ Dataset downloaded at:", path)
+    download_location = None
+    try:
+        import kagglehub
+        download_location = kagglehub.dataset_download("averkij/tennessee-eastman-process-simulation-dataset")
+        print("✅ Dataset downloaded at:", download_location)
+    except Exception as e:
+        print(f"⚠️ kagglehub download failed: {e}")
+        print("⏳ Falling back to Kaggle CLI if available.")
+        try:
+            subprocess.check_call([
+                "kaggle",
+                "datasets",
+                "download",
+                "-d",
+                "averkij/tennessee-eastman-process-simulation-dataset",
+                "-p",
+                target_dir,
+                "--unzip",
+            ])
+            download_location = target_dir
+            print("✅ Kaggle CLI download and unzip completed.")
+        except Exception as cli_error:
+            raise RuntimeError(
+                "Unable to download dataset automatically. Install kagglehub or configure the Kaggle CLI and retry."
+            ) from cli_error
 
-    # Copy + Convert
-    for fname in os.listdir(path):
-        src = os.path.join(path, fname)
-        dst = os.path.join(target_dir, fname)
+    if download_location and os.path.isfile(download_location) and download_location.lower().endswith(".zip"):
+        extracted_dir = os.path.join(target_dir, "downloaded")
+        os.makedirs(extracted_dir, exist_ok=True)
+        with zipfile.ZipFile(download_location, "r") as zf:
+            zf.extractall(extracted_dir)
+        download_location = extracted_dir
+        print(f"✅ Extracted download to {download_location}")
 
-        # Copy RData files if not already present
-        if not os.path.exists(dst):
-            shutil.copy2(src, dst)
-            print(f"📂 Copied {fname} → {target_dir}")
+    source_dir = download_location if os.path.isdir(download_location) else os.path.dirname(download_location)
+    if source_dir is None:
+        source_dir = target_dir
+
+    try:
+        import pyreadr
+    except ImportError as e:
+        raise ImportError(
+            "pyreadr is required to convert RData files to CSV. Install it with `pip install pyreadr`."
+        ) from e
+
+    for fname, csv_name in mapping.items():
+        src = os.path.join(source_dir, fname)
+        csv_dst = os.path.join(target_dir, csv_name)
+
+        if not os.path.exists(src):
+            print(f"⚠️ Expected file {fname} not found in {source_dir}. Skipping this file.")
+            continue
+
+        if not os.path.exists(csv_dst):
+            print(f"🔄 Converting {fname} → {csv_name}")
+            result = pyreadr.read_r(src)
+            if not result:
+                raise ValueError(f"Unable to read {src} with pyreadr.")
+            for key, df in result.items():
+                df.to_csv(csv_dst, index=False)
+                print(f"✅ Saved {csv_dst} ({len(df)} rows, {len(df.columns)} cols)")
         else:
-            print(f"⚡ {fname} already exists, skipping copy.")
-
-        # Convert to CSV if in mapping and CSV not already present
-        if fname in mapping:
-            csv_dst = os.path.join(target_dir, mapping[fname])
-            if not os.path.exists(csv_dst):
-                print(f"🔄 Converting {fname} → {mapping[fname]}")
-                result = pyreadr.read_r(src)   # returns a dict of dataframes
-                for key in result.keys():
-                    df = result[key]
-                    df.to_csv(csv_dst, index=False)
-                    print(f"✅ Saved {csv_dst} ({len(df)} rows, {len(df.columns)} cols)")
-            else:
-                print(f"⚡ {mapping[fname]} already exists, skipping conversion.")
+            print(f"⚡ {csv_name} already exists, skipping conversion.")
 
     print("🎉 Dataset ready in datasets/ (CSV available)")
 
