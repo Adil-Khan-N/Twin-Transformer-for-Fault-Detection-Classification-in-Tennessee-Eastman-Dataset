@@ -1,4 +1,11 @@
+import os
+import sys
 import torch
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 from utils.preprocess import Preprocessor
 from models.TwinTransformer import TwinGDLTransformer
 from utils.evaluate import evaluate_model
