@@ -1,9 +1,15 @@
+import argparse
+import os
+import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import os
 import pandas as pd
 import matplotlib.pyplot as plt
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from utils.preprocess import Preprocessor
 from models.TwinTransformer import TwinGDLTransformer
@@ -61,12 +67,21 @@ def save_confusion_matrix(cm, save_dir):
     print(f"📉 Confusion matrix saved to {cm_path}")
 
 
-def run_experiment(n_heads, device, num_epochs=100, batch_size=64, log_dir=None):
+def run_experiment(
+    n_heads,
+    device,
+    num_epochs=100,
+    batch_size=64,
+    data_dir="datasets",
+    output_dir="outputs",
+    log_dir=None,
+    resume=False,
+):
     print(f"\n{'='*60}")
     print(f"🚀 Running Experiment with n_heads = {n_heads}")
     print(f"{'='*60}\n")
 
-    preprocessor = Preprocessor(batch_size=batch_size)
+    preprocessor = Preprocessor(data_dir=data_dir, batch_size=batch_size)
     train_loader, val_loader, test_loader = preprocessor.get_dataloaders()
 
     model = TwinGDLTransformer(
@@ -75,18 +90,21 @@ def run_experiment(n_heads, device, num_epochs=100, batch_size=64, log_dir=None)
         d_model=64,
         n_heads=n_heads,
         n_classes=21,
-        n_layers=3
+        n_layers=3,
     )
     model.to(device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
-    save_dir = f"outputs/checkpoints/heads_{n_heads}"
+    save_dir = os.path.join(output_dir, f"checkpoints/heads_{n_heads}")
     os.makedirs(save_dir, exist_ok=True)
     best_model_path = os.path.join(save_dir, "best_model.pth")
+    checkpoint_path = os.path.join(save_dir, "checkpoint.pth")
 
-    print(f"📚 Training model with {n_heads} heads for {num_epochs} epochs...\n")
+    if resume and os.path.exists(checkpoint_path):
+        print(f"♻️ Resuming training from checkpoint: {checkpoint_path}")
+
     train_model(
         model,
         train_loader,
@@ -96,8 +114,13 @@ def run_experiment(n_heads, device, num_epochs=100, batch_size=64, log_dir=None)
         device,
         num_epochs=num_epochs,
         save_path=best_model_path,
+        checkpoint_path=checkpoint_path,
+        resume=resume,
         log_dir=log_dir,
     )
+
+    if not os.path.exists(best_model_path):
+        raise FileNotFoundError(f"Best model not found after training: {best_model_path}")
 
     model.load_state_dict(torch.load(best_model_path, map_location=device))
     model.to(device)
@@ -122,19 +145,8 @@ def run_experiment(n_heads, device, num_epochs=100, batch_size=64, log_dir=None)
     return metrics
 
 
-def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"⚡ Using device: {device}\n")
-
-    download_and_prepare_dataset()
-
-    os.makedirs("outputs/results", exist_ok=True)
-
-    n_heads = 4
-    log_dir = os.path.join("outputs", "logs", f"heads_{n_heads}")
-    metrics = run_experiment(n_heads, device, num_epochs=100, batch_size=64, log_dir=log_dir)
-    per_class = metrics.get("per_class", {})
-
+def save_experiment_results(metrics, output_dir, n_heads):
+    os.makedirs(output_dir, exist_ok=True)
     result_row = {
         "n_heads": n_heads,
         "accuracy": metrics["accuracy"],
@@ -142,6 +154,8 @@ def main():
         "recall": metrics["recall"],
         "f1": metrics["f1"],
     }
+    per_class = metrics.get("per_class", {})
+
     for idx, value in enumerate(per_class.get("accuracy", [])):
         result_row[f"accuracy_class_{idx:02d}"] = value
     for idx, value in enumerate(per_class.get("precision", [])):
@@ -151,15 +165,13 @@ def main():
     for idx, value in enumerate(per_class.get("f1", [])):
         result_row[f"f1_class_{idx:02d}"] = value
 
-    results = [result_row]
-    results_df = pd.DataFrame(results)
-
-    results_csv = os.path.join("outputs", "results", "heads_comparison.csv")
+    results_df = pd.DataFrame([result_row])
+    results_csv = os.path.join(output_dir, "heads_comparison.csv")
     results_df.to_csv(results_csv, index=False)
     print(f"\n✅ Results saved to {results_csv}")
 
-    save_classwise_metrics(per_class, os.path.join("outputs", "results"))
-    save_confusion_matrix(metrics["confusion_matrix"], os.path.join("outputs", "results"))
+    save_classwise_metrics(per_class, output_dir)
+    save_confusion_matrix(metrics["confusion_matrix"], output_dir)
 
     plt.figure(figsize=(10, 6))
     plt.plot(results_df["n_heads"], results_df["accuracy"], marker="o", label="Accuracy")
@@ -171,11 +183,46 @@ def main():
     plt.title("Transformer Performance vs. Number of Heads")
     plt.legend()
     plt.grid(True)
-    comparison_plot = os.path.join("outputs", "results", "heads_comparison_plot.png")
+    comparison_plot = os.path.join(output_dir, "heads_comparison_plot.png")
     plt.tight_layout()
     plt.savefig(comparison_plot)
     plt.close()
     print(f"📈 Comparison plot saved at {comparison_plot}")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run head sweep experiments with resume support.")
+    parser.add_argument("--n-heads", type=int, default=4, help="Number of transformer heads")
+    parser.add_argument("--epochs", type=int, default=100, help="Total epochs to train")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
+    parser.add_argument("--data-dir", type=str, default="datasets", help="Dataset directory")
+    parser.add_argument("--output-dir", type=str, default="outputs", help="Output directory")
+    parser.add_argument("--resume", action="store_true", help="Resume from existing checkpoint if available")
+    parser.add_argument("--no-download", action="store_true", help="Skip dataset download/check preparation")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"⚡ Using device: {device}\n")
+
+    if not args.no_download:
+        download_and_prepare_dataset()
+
+    log_dir = os.path.join(args.output_dir, "logs", f"heads_{args.n_heads}")
+    metrics = run_experiment(
+        n_heads=args.n_heads,
+        device=device,
+        num_epochs=args.epochs,
+        batch_size=args.batch_size,
+        data_dir=args.data_dir,
+        output_dir=args.output_dir,
+        log_dir=log_dir,
+        resume=args.resume,
+    )
+
+    save_experiment_results(metrics, os.path.join(args.output_dir, "results"), args.n_heads)
 
 
 if __name__ == "__main__":
